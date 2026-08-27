@@ -1,0 +1,76 @@
+name: Publish prices
+
+on:
+  schedule:
+    # The USD figures are about an hour old at publish time, so pull after the
+    # source has settled rather than racing it.
+    - cron: '17 14 * * *'
+  workflow_dispatch:
+
+# Pages deployment, and the archive commit, both need write access. This repo
+# publishes itself, which is why no personal access token is involved.
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish-prices
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # pull_prices.py refuses to write a short or mostly-unpriced file. Let it
+      # fail here: a truncated feed silently zeroes collections, where a stale
+      # one stays visible to the user.
+      - name: Pull the feed
+        run: python tools/pull_prices.py --out site --archive archive
+
+      - name: Say what is being served
+        run: |
+          set -euo pipefail
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <title>Pocketry price feed</title>
+          <h1>Pocketry price feed</h1>
+          <p>Machine-readable feed for the Pocketry app.</p>
+          <ul>
+            <li><a href="manifest.json">manifest.json</a></li>
+            <li><a href="prices.csv">prices.csv</a></li>
+          </ul>
+          HTML
+          python3 -c "import json;m=json.load(open('site/manifest.json'));print(m['latest'],m['prices']['rows'],'rows')"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+      # Committed, unlike the CSV: the archive is what value-over-time charts
+      # are built from and a gap in it is permanent. Gzipped, so a year of it
+      # is tens of megabytes rather than hundreds.
+      - name: Keep the archive
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add archive
+          if git diff --cached --quiet; then
+            echo 'Archive unchanged; nothing to commit.'
+            exit 0
+          fi
+          git commit -m "archive: $(python3 -c "import json;print(json.load(open('site/manifest.json'))['latest'])")"
+          git push
